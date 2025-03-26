@@ -4,7 +4,6 @@ import importlib
 import importlib.machinery
 import types
 import inspect
-import pickle
 import atheris
 
 sig_types = []

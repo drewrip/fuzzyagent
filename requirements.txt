@@ -1,0 +1,5 @@
+duckdb
+z3-solver
+openai
+atheris
+langchain-community
