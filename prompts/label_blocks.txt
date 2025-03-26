@@ -1,0 +1,17 @@
+Consider the following {language} function code:
+```
+{code_snippet}
+```
+
+Insert a comment on the first line of every block. For instance, insert a comment should be inserted in this if statement:
+```
+if condition:
+    # [n0]
+```
+
+The comment should contain a unique identifier like such:
+```
+{comment_syntax} [n1]
+```
+
+Be as terse as possible but include everything from the original code provided. Give absolutely no explanation. Anything that is not code will be penalized.

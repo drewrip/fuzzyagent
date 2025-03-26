@@ -1,0 +1,13 @@
+Consider the following {language} function:
+```
+{code_snippet}
+```
+
+Give a concrete example of parameter values that will make the function error. Provide the example as a JSON dictionary.
+
+Give absolutely no explanation. Anything that is not code will be penalized.
+
+The following examples are incorrect:
+```
+{examples}
+```

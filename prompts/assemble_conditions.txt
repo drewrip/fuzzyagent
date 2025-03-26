@@ -1,0 +1,15 @@
+Consider the following {language} function code:
+```
+{code_snippet}
+```
+
+List the control flow conditions that must be true to reach the comment at {code_point}. Provide this list in JSON as such:
+```json
+[
+    "condition1",
+    "condition2",
+    ...
+]
+```
+
+Give absolutely no explanation. Anything that is not code will be penalized. The only output given should be a JSON block.
