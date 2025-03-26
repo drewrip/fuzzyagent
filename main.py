@@ -7,6 +7,11 @@ import types
 import inspect
 import subprocess
 import hashlib
+import re
+import json
+import itertools
+import keyword
+import time
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
 import z3
@@ -24,6 +29,33 @@ def type_to_sql(t: type) -> str:
         return "DOUBLE"
     else:
         return "INTEGER"
+
+def default_for_type(t: type):
+    if t is float:
+        return float(0.0)
+    else:
+        return int(0)
+
+def numeric_z3(t: type, p: str):
+    if t is float:
+        return z3.Float64(p)
+    else:
+        return z3.Int(p)
+
+def valid_condition(condition: str, params: List[str]) -> bool:
+    if type(condition) is not str:
+        return False
+
+    ids = re.findall(RE_IDENTIFIER, condition)
+    if len(ids) < 1:
+        return False
+
+    for id in ids:
+        if id not in params:
+            return False
+        if keyword.iskeyword(id):
+            return False
+    return True
 
 def insert_guesses(con, arity, guesses: List[Tuple]):
     template = ", ".join(["?" for _ in range(arity)])
@@ -79,14 +111,105 @@ def fuzz(target, function_name, runs=10000, corpus_dir="/tmp/corpus", max_len=12
 
     return res
 
-def try_guess():
-    pass
+def try_guess(guess_chain, target_func) -> List[Tuple]:
+    code = inspect.getsource(target_func)
+    sig = inspect.signature(target_func)
+    params = [param for param in sig.parameters.keys()]
+    sig_types = [param[1].annotation if param[1].annotation is not inspect.Parameter.empty else int for param in sig.parameters.items()]
 
-def try_examples():
-    pass
+    candidates = {param: set() for param in params}
 
-def try_solver():
-    pass
+    response = guess_chain.invoke({"code_snippet": code, "language": "Python"})
+
+    json_blocks = re.findall(RE_JSON_BLOCK, response)
+    for block in json_blocks:
+        try:
+            solution = json.loads(block[1])
+            for variable, value in solution.items():
+                try:
+                    if variable in params and type(value) is sig_types[params.index(variable)]:
+                        candidates[variable].add(value)
+                except:
+                    pass
+        except:
+            pass
+
+    possible = []
+    for param in params:
+        possible.append(list(candidates[param]))
+
+    return list(itertools.product(*possible))
+
+def try_examples(examples_chain, target_func, examples=[]) -> List[Tuple]:
+    code = inspect.getsource(target_func)
+    sig = inspect.signature(target_func)
+    params = [param for param in sig.parameters.keys()]
+    sig_types = [param[1].annotation if param[1].annotation is not inspect.Parameter.empty else int for param in sig.parameters.items()]
+
+    examples_string = "\n".join([json.dumps({p: v for p, v in zip(params, list(example))}, indent=4) for example in examples])
+    candidates = {param: set() for param in params}
+    response = examples_chain.invoke({"code_snippet": code, "language": "Python", "examples": examples_string})
+
+    json_blocks = re.findall(RE_JSON_BLOCK, response)
+    for block in json_blocks:
+        try:
+            solution = json.loads(block[1])
+            for variable, value in solution.items():
+                try:
+                    if variable in params and type(value) is sig_types[params.index(variable)]:
+                        candidates[variable].add(value)
+                except:
+                    pass
+        except:
+            pass
+
+    possible = []
+    for param in params:
+        possible.append(list(candidates[param]))
+
+    return list(itertools.product(*possible))
+
+def try_solver(label_chain, assemble_chain, target_func) -> List[Tuple]:
+    code = inspect.getsource(target_func)
+    sig = inspect.signature(target_func)
+    params = [param for param in sig.parameters.keys()]
+    sig_types = [param[1].annotation if param[1].annotation is not inspect.Parameter.empty else int for param in sig.parameters.items()]
+
+    candidates = []
+
+    labeled_code = label_chain.invoke({"code_snippet": code, "language": "Python", "comment_syntax": "#"})
+    code_points = re.findall(RE_CODE_POINTS, labeled_code)
+    for code_point in code_points:
+        conditions_response = assemble_chain.invoke({"code_snippet": labeled_code, "language": "Python", "code_point": code_point})
+        json_blocks = re.findall(RE_JSON_BLOCK, conditions_response)
+        for block in json_blocks:
+            s = z3.Solver()
+            variables = {p: numeric_z3(t, p) for p, t in zip(params, sig_types)}
+            locals().update(variables) # yikes
+            try:
+                conditions = json.loads(block[1])
+            except json.decoder.JSONDecodeError:
+                continue
+            for condition in conditions:
+                if valid_condition(condition, params):
+                    try:
+                        s.add(eval(condition))
+                    except z3.z3types.Z3Exception:
+                        continue
+            if s.check() == z3.sat:
+                m = s.model()
+                included_variables = {str(v): v for v in m.decls()}
+                solution = []
+                for param, t in zip(params, sig_types):
+                    if param in included_variables:
+                        solution.append(m[included_variables[param]])
+                    else:
+                        solution.append(default_for_type(t))
+                candidates.append(tuple(solution))
+            else:
+                print("model is unsat")
+
+    return candidates
 
 def try_eval(target_func, inputs: List[Tuple]):
     crashes = []
@@ -136,7 +259,7 @@ def fuzzyagent() -> int:
     sig_types = [param[1].annotation if param[1].annotation is not inspect.Parameter.empty else int for param in sig.parameters.items()]
 
 
-    if args.only_fuzz:
+    if args.fuzz_only:
         res = fuzz(target_file, target_func_name)
     else:
         con = duckdb.connect(database = ":memory:")
@@ -160,26 +283,33 @@ def fuzzyagent() -> int:
         assemble_chain = prompts["assemble_conditions"] | llm
 
         for i in range(args.runs):
-            guesses = try_guess(guess_chain)
+            """
+            # Inital Guess Phase
+            guesses = try_guess(guess_chain, target_func)
             try_eval(target_func, guesses)
+            # check
             fuzz(target_file, target_func_name, max_len=args.max_len, runs=args.fuzzer_loops)
             # check
-            save_guesses(guesses, corpus_dir=args.corpus_dir)
+            save_guesses(guesses)
             insert_guesses(con, arity, guesses)
 
-            guesses = try_examples(examples_chain, examples=topn(con, n=2))
+            # Guess w/ Examples Phase
+            guesses = try_examples(examples_chain, target_func, examples=topn(con, params[0], n=2))
             try_eval(target_func, guesses)
+            # check
             fuzz(target_file, target_func_name, max_len=args.max_len, runs=args.fuzzer_loops)
             # check
-            save_guesses(guesses, corpus_dir=args.corpus_dir)
+            save_guesses(guesses)
             insert_guesses(con, arity, guesses)
-
-            guesses = try_solver(label_chain, assemble_chain)
+            """
+            # Attempt to Solve
+            guesses = try_solver(label_chain, assemble_chain, target_func)
             try_eval(target_func, guesses)
-            fuzz(target_file, target_func_name, max_len=args.max_len, runs=args.fuzzer_loops)
-            save_guesses(guesses, corpus_dir=args.corpus_dir)
+            # check
+            #fuzz(target_file, target_func_name, max_len=args.max_len, runs=args.fuzzer_loops)
+            # check
+            save_guesses(guesses)
             insert_guesses(con, arity, guesses)
-
     return 0
 
 def main() -> int:

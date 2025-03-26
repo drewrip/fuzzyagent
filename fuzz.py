@@ -54,7 +54,6 @@ def main() -> int:
     @atheris.instrument_func
     def TestOneInput(data: bytes) -> None:
         inputs = get_input(data)
-        print(inputs)
         target_func(*inputs)
 
     fuzzer_args = [f"-atheris_runs={args.runs}", f"-max_len={args.max_len}"]
