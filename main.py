@@ -19,10 +19,40 @@ from langchain_community.llms import VLLMOpenAI
 from langchain_core.prompts import PromptTemplate
 import duckdb
 
+trace = {
+    "start_time": 0,
+    "end_time": 0,
+    "fuzz_only": False,
+    "run_number": 0,
+    "caught_in_phase": "",
+    "caught_by": "", # Eval or phase
+    "results": "",
+    "found": False,
+    "file": "",
+    "function": "",
+}
+
+output_path = None
 
 RE_CODE_POINTS = r'# (\[[a-zA-Z0-9\-\_]+\])'
 RE_IDENTIFIER = r'([^\d\W]\w*)'
 RE_JSON_BLOCK = r'```(json)?([^(```)]*)```'
+
+def sync_trace(time=None, run=None, current_phase=None, about_to_test=None, results=None, found=None):
+    global trace
+    if time is not None:
+        trace["end_time"] = time
+    if run is not None:
+        trace["run_number"] = run
+    if current_phase is not None:
+        trace["caught_in_phase"] = current_phase
+    if about_to_test is not None:
+        trace["caught_by"] = about_to_test
+    if results is not None:
+        trace["results"] = results
+    if found is not None:
+        trace["found"] = found
+
 
 def type_to_sql(t: type) -> str:
     if t is float:
@@ -88,11 +118,11 @@ class CmdResult:
     stderr: Optional[str]
 
 def run(cmd: str, ignore_output=False, out_file=sys.stdout, err_file=sys.stderr) -> CmdResult:
-    ran = subprocess.run(cmd, shell=True, stdout=(subprocess.DEVNULL if ignore_output else subprocess.PIPE), stderr=(subprocess.DEVNULL if ignore_output else subprocess.PIPE))
+    ran = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     result = CmdResult(
         ran.returncode,
-        None if ignore_output else ran.stdout.decode("utf-8"),
-        None if ignore_output else ran.stderr.decode("utf-8"),
+        ran.stdout.decode("utf-8"),
+        ran.stderr.decode("utf-8"),
     )
     if not ignore_output:
         out_file.write(str(result.stdout))
@@ -107,7 +137,7 @@ def fuzz(target, function_name, runs=10000, corpus_dir="/tmp/corpus", max_len=12
     fuzz_cmd += f"--corpus={corpus_dir} "
     fuzz_cmd += f"{target}"
 
-    res = run(fuzz_cmd)
+    res = run(fuzz_cmd, ignore_output=True)
 
     return res
 
@@ -206,8 +236,6 @@ def try_solver(label_chain, assemble_chain, target_func) -> List[Tuple]:
                     else:
                         solution.append(default_for_type(t))
                 candidates.append(tuple(solution))
-            else:
-                print("model is unsat")
 
     return candidates
 
@@ -232,9 +260,14 @@ def fuzzyagent() -> int:
     parser.add_argument("-r", "--runs", type=int, default=1)
     parser.add_argument("-l", "--fuzzer-loops", type=int, default=10000)
     parser.add_argument("-m", "--max-len", type=int, default=128)
+    parser.add_argument("-o", "--output", type=str)
     parser.add_argument("--prompts", type=str, default="prompts/")
     parser.add_argument("targets", nargs="*")
     args = parser.parse_args()
+
+    if args.output is not None:
+        global output_path
+        output_path = args.output
 
     if len(args.targets) != 1:
         print("[FUZZYAGENT ERROR] you must provide the path to one target")
@@ -258,8 +291,12 @@ def fuzzyagent() -> int:
     global sig_types
     sig_types = [param[1].annotation if param[1].annotation is not inspect.Parameter.empty else int for param in sig.parameters.items()]
 
-
+    trace["start_time"] = int(time.time())
+    trace["function"] = target_func_name
+    trace["file"] = target_file
     if args.fuzz_only:
+        trace["fuzz_only"] = True
+        sync_trace(time=int(time.time()))
         res = fuzz(target_file, target_func_name)
     else:
         con = duckdb.connect(database = ":memory:")
@@ -283,37 +320,66 @@ def fuzzyagent() -> int:
         assemble_chain = prompts["assemble_conditions"] | llm
 
         for i in range(args.runs):
-            """
+            sync_trace(run=i)
+
             # Inital Guess Phase
+            sync_trace(time=int(time.time()), current_phase="guess")
             guesses = try_guess(guess_chain, target_func)
-            try_eval(target_func, guesses)
-            # check
-            fuzz(target_file, target_func_name, max_len=args.max_len, runs=args.fuzzer_loops)
-            # check
+            sync_trace(time=int(time.time()), about_to_test="eval")
+            res = try_eval(target_func, guesses)
+            if len(res) > 0:
+                sync_trace(time=int(time.time()), results=str(res), found=True)
+                return 0
+            sync_trace(time=int(time.time()), about_to_test="fuzzer")
+            res = fuzz(target_file, target_func_name, max_len=args.max_len, runs=args.fuzzer_loops)
+            if res.rc != 0:
+                sync_trace(time=int(time.time()), results=str(res.stderr), found=True)
+                return 0
             save_guesses(guesses)
             insert_guesses(con, arity, guesses)
 
             # Guess w/ Examples Phase
+            sync_trace(time=int(time.time()), current_phase="examples")
             guesses = try_examples(examples_chain, target_func, examples=topn(con, params[0], n=2))
-            try_eval(target_func, guesses)
-            # check
-            fuzz(target_file, target_func_name, max_len=args.max_len, runs=args.fuzzer_loops)
-            # check
+            sync_trace(time=int(time.time()), about_to_test="eval")
+            res = try_eval(target_func, guesses)
+            if len(res) > 0:
+                sync_trace(time=int(time.time()), results=str(res), found=True)
+                return 0
+            sync_trace(time=int(time.time()), about_to_test="fuzzer")
+            res = fuzz(target_file, target_func_name, max_len=args.max_len, runs=args.fuzzer_loops)
+            if res.rc != 0:
+                sync_trace(time=int(time.time()), results=str(res.stderr), found=True)
+                return 0
             save_guesses(guesses)
             insert_guesses(con, arity, guesses)
-            """
+
             # Attempt to Solve
+            sync_trace(time=int(time.time()), current_phase="solver")
             guesses = try_solver(label_chain, assemble_chain, target_func)
-            try_eval(target_func, guesses)
-            # check
-            #fuzz(target_file, target_func_name, max_len=args.max_len, runs=args.fuzzer_loops)
-            # check
+            sync_trace(time=int(time.time()), about_to_test="eval")
+            res = try_eval(target_func, guesses)
+            if len(res) > 0:
+                sync_trace(time=int(time.time()), results=str(res), found=True)
+                return 0
+            sync_trace(time=int(time.time()), about_to_test="fuzzer")
+            res = fuzz(target_file, target_func_name, max_len=args.max_len, runs=args.fuzzer_loops)
+            if res.rc != 0:
+                sync_trace(time=int(time.time()), results=str(res.stderr), found=True)
+                return 0
             save_guesses(guesses)
             insert_guesses(con, arity, guesses)
-    return 0
+    return 1
 
 def main() -> int:
     rc = fuzzyagent()
+
+    if trace["found"]:
+        print(f"Found exception in {trace['file']}:{trace['function']}:\n\n{trace['results']}")
+
+    if output_path is not None:
+        with open(output_path, "w") as f:
+            json.dump(trace, f, indent=4)
     return rc
 
 if __name__ == "__main__":
