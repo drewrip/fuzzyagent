@@ -85,3 +85,14 @@ def g2(a: float, b: float):
             return 0.0
     else:
         return 0.0
+
+def debug(a, b):
+    value = 0
+    if a > 10000:
+        if b < 1000:
+            raise Exception("Fatal Error")
+        else:
+            value = 0
+    else:
+        value = 0
+    return value

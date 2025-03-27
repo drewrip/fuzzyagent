@@ -5,6 +5,7 @@ import importlib.machinery
 import types
 import inspect
 import atheris
+import struct
 
 sig_types = []
 
@@ -30,6 +31,7 @@ def main() -> int:
     parser.add_argument("-r", "--runs", default=10000)
     parser.add_argument("-m", "--max-len", default=1024)
     parser.add_argument("-c", "--corpus")
+    parser.add_argument("-y", "--replay", type=str)
     parser.add_argument("targets", nargs="*")
     args = parser.parse_args()
 
@@ -56,11 +58,21 @@ def main() -> int:
         inputs = get_input(data)
         target_func(*inputs)
 
+    @atheris.instrument_func
+    def ReplayTestOneInput(data: bytes) -> None:
+        inputs = get_input(data)
+        print(f"inputs={inputs}")
+        target_func(*inputs)
+
+    test_one_input = TestOneInput
     fuzzer_args = [f"-atheris_runs={args.runs}", f"-max_len={args.max_len}"]
+    if args.replay is not None:
+        fuzzer_args = [sys.argv[0], args.replay]
+        test_one_input = ReplayTestOneInput
+
     if args.corpus is not None:
         fuzzer_args.append(args.corpus)
-
-    atheris.Setup(fuzzer_args, TestOneInput)
+    atheris.Setup(fuzzer_args, test_one_input)
     atheris.Fuzz()
 
     return 0
